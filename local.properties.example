@@ -1,0 +1,8 @@
+# Copy this file to local.properties for local Android SDK and model overrides.
+# Do not commit local.properties.
+# Optional overrides.
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+
+# Optional model overrides.
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+OPENAI_SUMMARY_MODEL=gpt-5.4-mini
