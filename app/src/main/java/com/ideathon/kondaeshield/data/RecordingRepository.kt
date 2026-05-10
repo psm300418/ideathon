@@ -51,6 +51,29 @@ class RecordingRepository(context: Context) {
         save(updated)
     }
 
+    @Synchronized
+    fun deleteSession(sessionId: String): Boolean {
+        val current = getSessions()
+        val session = current.firstOrNull { it.id == sessionId } ?: return false
+        val updated = current.filterNot { it.id == sessionId }
+
+        deleteRecordingFile(session)
+        save(updated)
+
+        return true
+    }
+
+    private fun deleteRecordingFile(session: RecordingSession) {
+        val path = session.audioFilePath.takeIf { it.isNotBlank() } ?: return
+        val target = runCatching { File(path).canonicalFile }.getOrNull() ?: return
+        val filesRoot = runCatching { appContext.filesDir.canonicalFile }.getOrNull() ?: return
+
+        if (!target.path.startsWith(filesRoot.path + File.separator)) return
+        if (target.exists()) {
+            target.delete()
+        }
+    }
+
     private fun save(sessions: List<RecordingSession>) {
         sessionsDir.mkdirs()
         val array = JSONArray()

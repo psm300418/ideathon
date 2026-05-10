@@ -13,6 +13,8 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +33,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
@@ -93,6 +97,8 @@ class MainActivity : ComponentActivity() {
     private var showApiKeyDialog by mutableStateOf(false)
     private var apiKeyProvider by mutableStateOf(ApiProvider.GROQ)
     private var apiKeyDraft by mutableStateOf("")
+    private var transcriptDialogSession by mutableStateOf<RecordingSession?>(null)
+    private var deleteDialogSession by mutableStateOf<RecordingSession?>(null)
     private var receiverRegistered = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -127,6 +133,8 @@ class MainActivity : ComponentActivity() {
                     showApiKeyDialog = showApiKeyDialog,
                     apiKeyProvider = apiKeyProvider,
                     apiKeyDraft = apiKeyDraft,
+                    transcriptDialogSession = transcriptDialogSession,
+                    deleteDialogSession = deleteDialogSession,
                     onSelectTab = { selectedTab = it },
                     onRefresh = {
                         refreshSessions()
@@ -135,6 +143,28 @@ class MainActivity : ComponentActivity() {
                     onRequestPermissions = ::requestRequiredPermissions,
                     onOpenAccessibilitySettings = ::openAccessibilitySettings,
                     onToggleRecording = { RecordingService.toggle(this) },
+                    onOpenTranscript = { session ->
+                        transcriptDialogSession = session
+                    },
+                    onDismissTranscript = {
+                        transcriptDialogSession = null
+                    },
+                    onRequestDelete = { session ->
+                        deleteDialogSession = session
+                    },
+                    onConfirmDelete = {
+                        deleteDialogSession?.let { deletingSession ->
+                            repository.deleteSession(deletingSession.id)
+                            if (transcriptDialogSession?.id == deletingSession.id) {
+                                transcriptDialogSession = null
+                            }
+                            deleteDialogSession = null
+                            refreshSessions()
+                        }
+                    },
+                    onDismissDelete = {
+                        deleteDialogSession = null
+                    },
                     onSelectTranscriptionProvider = { provider ->
                         apiKeyStore.setTranscriptionProvider(provider)
                         refreshSettingsState()
@@ -272,11 +302,18 @@ private fun NagBlockerScreen(
     showApiKeyDialog: Boolean,
     apiKeyProvider: ApiProvider,
     apiKeyDraft: String,
+    transcriptDialogSession: RecordingSession?,
+    deleteDialogSession: RecordingSession?,
     onSelectTab: (Int) -> Unit,
     onRefresh: () -> Unit,
     onRequestPermissions: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onToggleRecording: () -> Unit,
+    onOpenTranscript: (RecordingSession) -> Unit,
+    onDismissTranscript: () -> Unit,
+    onRequestDelete: (RecordingSession) -> Unit,
+    onConfirmDelete: () -> Unit,
+    onDismissDelete: () -> Unit,
     onSelectTranscriptionProvider: (ApiProvider) -> Unit,
     onOpenApiKeyDialog: (ApiProvider) -> Unit,
     onApiKeyDraftChange: (String) -> Unit,
@@ -344,10 +381,10 @@ private fun NagBlockerScreen(
                     sessions = sessions,
                     hasAudioPermission = hasAudioPermission,
                     hasNotificationPermission = hasNotificationPermission,
-                    accessibilityEnabled = accessibilityEnabled,
                     hasTranscriptionApiKey = transcriptionProvider in storedProviders,
-                    transcriptionProvider = transcriptionProvider,
                     onToggleRecording = onToggleRecording,
+                    onOpenTranscript = onOpenTranscript,
+                    onRequestDelete = onRequestDelete,
                 )
 
                 SUMMARY_TAB -> SummaryTab(sessions = sessions)
@@ -377,6 +414,21 @@ private fun NagBlockerScreen(
             onApiKeyDraftChange = onApiKeyDraftChange,
             onSaveApiKey = onSaveApiKey,
             onDismiss = onDismissApiKeyDialog,
+        )
+    }
+
+    transcriptDialogSession?.let { session ->
+        TranscriptDialog(
+            session = session,
+            onDismiss = onDismissTranscript,
+        )
+    }
+
+    deleteDialogSession?.let { session ->
+        DeleteSessionDialog(
+            session = session,
+            onConfirmDelete = onConfirmDelete,
+            onDismiss = onDismissDelete,
         )
     }
 }
@@ -412,10 +464,10 @@ private fun RecordScriptTab(
     sessions: List<RecordingSession>,
     hasAudioPermission: Boolean,
     hasNotificationPermission: Boolean,
-    accessibilityEnabled: Boolean,
     hasTranscriptionApiKey: Boolean,
-    transcriptionProvider: ApiProvider,
     onToggleRecording: () -> Unit,
+    onOpenTranscript: (RecordingSession) -> Unit,
+    onRequestDelete: (RecordingSession) -> Unit,
 ) {
     val activeSession = sessions.firstOrNull {
         it.state == ProcessingState.RECORDING ||
@@ -434,16 +486,19 @@ private fun RecordScriptTab(
     ) {
         item {
             RecordingHeroPanel(
-                activeLabel = activeSession?.state?.label ?: "대기 중",
                 isRecording = isRecording,
                 isProcessing = isProcessing,
                 permissionsReady = permissionsReady,
-                hasAudioPermission = hasAudioPermission,
-                hasNotificationPermission = hasNotificationPermission,
-                accessibilityEnabled = accessibilityEnabled,
                 hasTranscriptionApiKey = hasTranscriptionApiKey,
-                transcriptionProvider = transcriptionProvider,
                 onToggleRecording = onToggleRecording,
+            )
+        }
+
+        item {
+            Text(
+                text = "텍스트화된 기록",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
             )
         }
 
@@ -459,7 +514,11 @@ private fun RecordScriptTab(
                 items = sessions,
                 key = { it.id },
             ) { session ->
-                ScriptSessionCard(session = session)
+                ScriptSessionCard(
+                    session = session,
+                    onOpenTranscript = onOpenTranscript,
+                    onRequestDelete = onRequestDelete,
+                )
             }
         }
     }
@@ -568,106 +627,35 @@ private fun SettingsTab(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RecordingHeroPanel(
-    activeLabel: String,
     isRecording: Boolean,
     isProcessing: Boolean,
     permissionsReady: Boolean,
-    hasAudioPermission: Boolean,
-    hasNotificationPermission: Boolean,
-    accessibilityEnabled: Boolean,
     hasTranscriptionApiKey: Boolean,
-    transcriptionProvider: ApiProvider,
     onToggleRecording: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.primaryContainer,
+        color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
-        tonalElevation = 2.dp,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
     ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+        Button(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            enabled = permissionsReady && hasTranscriptionApiKey && !isProcessing,
+            onClick = onToggleRecording,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(
-                        text = "녹음과 스크립트 확인",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                    Text(
-                        text = "${transcriptionProvider.displayName} 전사 · $activeLabel",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                }
-                Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    contentColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    Icon(
-                        modifier = Modifier
-                            .padding(12.dp)
-                            .size(30.dp),
-                        imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
-                        contentDescription = null,
-                    )
-                }
-            }
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StatusChip(
-                    icon = Icons.Default.Mic,
-                    label = if (hasAudioPermission) "마이크 허용" else "마이크 필요",
-                    positive = hasAudioPermission,
-                )
-                StatusChip(
-                    icon = Icons.Default.Security,
-                    label = if (accessibilityEnabled) "볼륨 감지 켜짐" else "볼륨 감지 꺼짐",
-                    positive = accessibilityEnabled,
-                )
-                StatusChip(
-                    icon = Icons.Default.Description,
-                    label = if (hasTranscriptionApiKey) "전사 키 저장됨" else "전사 키 필요",
-                    positive = hasTranscriptionApiKey,
-                )
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    StatusChip(
-                        icon = Icons.Default.Security,
-                        label = if (hasNotificationPermission) "알림 허용" else "알림 필요",
-                        positive = hasNotificationPermission,
-                    )
-                }
-            }
-
-            Button(
-                enabled = permissionsReady && hasTranscriptionApiKey && !isProcessing,
-                onClick = onToggleRecording,
-            ) {
-                Icon(
-                    modifier = Modifier.size(18.dp),
-                    imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
-                    contentDescription = null,
-                )
-                Spacer(modifier = Modifier.size(8.dp))
-                Text(if (isRecording) "녹음 종료" else "녹음 시작")
-            }
+            Icon(
+                modifier = Modifier.size(18.dp),
+                imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                contentDescription = null,
+            )
+            Spacer(modifier = Modifier.size(8.dp))
+            Text(if (isRecording) "녹음 종료" else "녹음 시작")
         }
     }
 }
@@ -914,6 +902,71 @@ private fun ProviderKeyRow(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun TranscriptDialog(
+    session: RecordingSession,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(formatSessionTime(session.createdAtEpochMillis))
+        },
+        text = {
+            SelectionContainer {
+                Text(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    text = session.transcript,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("닫기")
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DeleteSessionDialog(
+    session: RecordingSession,
+    onConfirmDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("기록 삭제")
+        },
+        text = {
+            Text(
+                text = "${formatSessionTime(session.createdAtEpochMillis)} 녹음 파일과 스크립트 기록을 모두 삭제할까요?",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirmDelete) {
+                Text(
+                    text = "삭제",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("취소")
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun ApiKeyDialog(
     provider: ApiProvider,
     apiKeyDraft: String,
@@ -1012,15 +1065,62 @@ private fun EmptyState(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ScriptSessionCard(session: RecordingSession) {
+private fun ScriptSessionCard(
+    session: RecordingSession,
+    onOpenTranscript: (RecordingSession) -> Unit,
+    onRequestDelete: (RecordingSession) -> Unit,
+) {
     SessionShell(session = session) {
         if (session.transcript.isNotBlank()) {
-            TextSection(
-                icon = Icons.Default.Description,
-                title = "전체 스크립트",
-                body = session.transcript,
+            Text(
+                text = session.transcript,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
             )
+        } else {
+            Text(
+                text = when (session.state) {
+                    ProcessingState.RECORDING -> "녹음 중입니다."
+                    ProcessingState.TRANSCRIBING -> "스크립트를 생성하고 있습니다."
+                    ProcessingState.SUMMARIZING -> "요약을 준비하고 있습니다."
+                    ProcessingState.COMPLETE -> "저장된 스크립트가 비어 있습니다."
+                    ProcessingState.FAILED -> "스크립트를 만들지 못했습니다."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedButton(
+                enabled = session.transcript.isNotBlank(),
+                onClick = { onOpenTranscript(session) },
+            ) {
+                Text("전체 보기")
+            }
+            TextButton(
+                enabled = session.state.canDelete(),
+                onClick = { onRequestDelete(session) },
+            ) {
+                Icon(
+                    modifier = Modifier.size(18.dp),
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+                Spacer(modifier = Modifier.size(6.dp))
+                Text(
+                    text = "삭제",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
 }
@@ -1126,13 +1226,6 @@ private fun SessionShell(
                         text = formatSessionTime(session.createdAtEpochMillis),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = session.audioFilePath,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 StateBadge(state = session.state)
@@ -1250,6 +1343,11 @@ private fun formatSessionTime(epochMillis: Long): String {
         .withZone(ZoneId.systemDefault())
     return formatter.format(Instant.ofEpochMilli(epochMillis))
 }
+
+private fun ProcessingState.canDelete(): Boolean =
+    this != ProcessingState.RECORDING &&
+        this != ProcessingState.TRANSCRIBING &&
+        this != ProcessingState.SUMMARIZING
 
 private const val RECORD_SCRIPT_TAB = 0
 private const val SUMMARY_TAB = 1
