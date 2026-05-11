@@ -48,6 +48,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -73,6 +74,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.ideathon.kondaeshield.accessibility.VolumeKeyAccessibilityService
+import com.ideathon.kondaeshield.analysis.NaggingAnalysis
+import com.ideathon.kondaeshield.analysis.NaggingAnalyzer
 import com.ideathon.kondaeshield.data.ProcessingState
 import com.ideathon.kondaeshield.data.RecordingRepository
 import com.ideathon.kondaeshield.data.RecordingSession
@@ -164,6 +167,13 @@ class MainActivity : ComponentActivity() {
                     },
                     onDismissDelete = {
                         deleteDialogSession = null
+                    },
+                    onAnalyzeNagging = { session ->
+                        val analysis = NaggingAnalyzer.analyze(session.transcript)
+                        repository.updateSession(session.id) {
+                            it.copy(naggingAnalysis = analysis.toJsonString())
+                        }
+                        refreshSessions()
                     },
                     onSelectTranscriptionProvider = { provider ->
                         apiKeyStore.setTranscriptionProvider(provider)
@@ -314,6 +324,7 @@ private fun NagBlockerScreen(
     onRequestDelete: (RecordingSession) -> Unit,
     onConfirmDelete: () -> Unit,
     onDismissDelete: () -> Unit,
+    onAnalyzeNagging: (RecordingSession) -> Unit,
     onSelectTranscriptionProvider: (ApiProvider) -> Unit,
     onOpenApiKeyDialog: (ApiProvider) -> Unit,
     onApiKeyDraftChange: (String) -> Unit,
@@ -326,7 +337,7 @@ private fun NagBlockerScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = "잔소리 차단기",
+                        text = "꼰BTI",
                         fontWeight = FontWeight.Bold,
                     )
                 },
@@ -389,7 +400,10 @@ private fun NagBlockerScreen(
 
                 SUMMARY_TAB -> SummaryTab(sessions = sessions)
 
-                NAGGING_TAB -> NaggingTab(sessions = sessions)
+                NAGGING_TAB -> NaggingTab(
+                    sessions = sessions,
+                    onAnalyzeNagging = onAnalyzeNagging,
+                )
 
                 SETTINGS_TAB -> SettingsTab(
                     hasAudioPermission = hasAudioPermission,
@@ -559,7 +573,10 @@ private fun SummaryTab(sessions: List<RecordingSession>) {
 }
 
 @Composable
-private fun NaggingTab(sessions: List<RecordingSession>) {
+private fun NaggingTab(
+    sessions: List<RecordingSession>,
+    onAnalyzeNagging: (RecordingSession) -> Unit,
+) {
     val scriptSessions = sessions.filter { it.transcript.isNotBlank() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -568,8 +585,8 @@ private fun NaggingTab(sessions: List<RecordingSession>) {
     ) {
         item {
             FeatureHeaderPanel(
-                title = "꼰대력 측정",
-                subtitle = "비난, 비교, 실질 조언 비율을 분석하는 기능을 붙일 자리입니다.",
+                title = "꼰BTI 측정",
+                subtitle = "스크립트 속 잔소리 패턴을 분석해 어떤 유형의 꼰대인지 분류합니다.",
                 icon = Icons.Default.Security,
             )
         }
@@ -586,7 +603,10 @@ private fun NaggingTab(sessions: List<RecordingSession>) {
                 items = scriptSessions,
                 key = { it.id },
             ) { session ->
-                NaggingSessionCard(session = session)
+                NaggingSessionCard(
+                    session = session,
+                    onAnalyzeNagging = onAnalyzeNagging,
+                )
             }
         }
     }
@@ -1172,27 +1192,101 @@ private fun SummarySessionCard(session: RecordingSession) {
 }
 
 @Composable
-private fun NaggingSessionCard(session: RecordingSession) {
+private fun NaggingSessionCard(
+    session: RecordingSession,
+    onAnalyzeNagging: (RecordingSession) -> Unit,
+) {
+    val analysis = NaggingAnalysis.fromJsonString(session.naggingAnalysis)
+
     SessionShell(session = session) {
-        if (session.naggingAnalysis.isNotBlank()) {
-            TextSection(
-                icon = Icons.Default.Security,
-                title = "꼰대력 분석",
-                body = session.naggingAnalysis,
-            )
+        if (analysis != null) {
+            NaggingResultContent(analysis = analysis)
         } else {
             Text(
-                text = "분석 결과가 없습니다. 비난, 비교, 실질 조언 비율 분석을 이곳에 연결하면 됩니다.",
+                text = "아직 꼰BTI 결과가 없습니다. 이 스크립트를 분석해서 잔소리 유형을 확인해보세요.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+
         OutlinedButton(
-            enabled = false,
-            onClick = {},
+            onClick = { onAnalyzeNagging(session) },
         ) {
-            Text("꼰대력 측정")
+            Icon(
+                modifier = Modifier.size(18.dp),
+                imageVector = Icons.Default.Security,
+                contentDescription = null,
+            )
+            Spacer(modifier = Modifier.size(8.dp))
+            Text(if (analysis == null) "꼰BTI 측정" else "다시 측정")
         }
+    }
+}
+
+@Composable
+private fun NaggingResultContent(analysis: NaggingAnalysis) {
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = analysis.resultLabel,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "꼰대력 ${analysis.totalPercent}%",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            NaggingScoreRow(label = "비난", percent = analysis.blamePercent)
+            NaggingScoreRow(label = "비교", percent = analysis.comparisonPercent)
+            NaggingScoreRow(label = "일방적 지시", percent = analysis.commandPercent)
+            NaggingScoreRow(label = "라떼력", percent = analysis.lattePercent)
+            NaggingScoreRow(label = "실질 조언", percent = analysis.practicalAdvicePercent)
+        }
+
+        TextSection(
+            icon = Icons.Default.Security,
+            title = "해석",
+            body = analysis.explanation,
+        )
+        TextSection(
+            icon = Icons.Default.Description,
+            title = "바꿔 말하면",
+            body = analysis.rewriteSuggestion,
+        )
+    }
+}
+
+@Composable
+private fun NaggingScoreRow(
+    label: String,
+    percent: Int,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "$percent%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        LinearProgressIndicator(
+            progress = { percent.coerceIn(0, 100) / 100f },
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
