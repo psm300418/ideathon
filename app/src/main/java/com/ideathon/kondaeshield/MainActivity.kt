@@ -1255,8 +1255,8 @@ private fun NaggingResultContent(analysis: NaggingAnalysis) {
         )
         TextSection(
             icon = Icons.Default.Description,
-            title = "바꿔 말하면",
-            body = analysis.rewriteSuggestion,
+            title = "공감",
+            body = analysis.empathyMessage,
         )
     }
 }
