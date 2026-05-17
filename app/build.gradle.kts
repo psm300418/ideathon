@@ -39,10 +39,15 @@ android {
             "GROQ_TRANSCRIPTION_MODEL",
             "whisper-large-v3-turbo",
         )
+        val groqEmpathyModel = localProperties.getProperty(
+            "GROQ_EMPATHY_MODEL",
+            "llama-3.1-8b-instant",
+        )
 
         buildConfigField("String", "OPENAI_TRANSCRIPTION_MODEL", transcriptionModel.asBuildConfigString())
         buildConfigField("String", "OPENAI_SUMMARY_MODEL", summaryModel.asBuildConfigString())
         buildConfigField("String", "GROQ_TRANSCRIPTION_MODEL", groqTranscriptionModel.asBuildConfigString())
+        buildConfigField("String", "GROQ_EMPATHY_MODEL", groqEmpathyModel.asBuildConfigString())
     }
 
     buildFeatures {

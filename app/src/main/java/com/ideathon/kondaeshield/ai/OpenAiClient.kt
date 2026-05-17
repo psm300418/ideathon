@@ -1,6 +1,10 @@
 package com.ideathon.kondaeshield.ai
 
 import com.ideathon.kondaeshield.BuildConfig
+import com.ideathon.kondaeshield.analysis.JinsangAnalysis
+import com.ideathon.kondaeshield.analysis.JinsangEmpathyContext
+import com.ideathon.kondaeshield.summary.SummaryMode
+import com.ideathon.kondaeshield.summary.SummaryPromptContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
@@ -43,26 +47,64 @@ class OpenAiClient(
         return JSONObject(response).getString("text").trim()
     }
 
-    fun summarizeBusiness(transcript: String): String {
+    fun generateSummary(
+        transcript: String,
+        mode: SummaryMode,
+    ): String {
         ensureConfigured()
+        val context = SummaryPromptContext.forMode(transcript, mode)
 
         val request = JSONObject()
             .put("model", summaryModel)
             .put("store", false)
-            .put("max_output_tokens", 700)
+            .put("max_output_tokens", 500)
+            .put("instructions", AiPromptTemplates.summaryInstructions(mode))
             .put(
-                "instructions",
-                """
-                너는 한국어 회의/업무 대화 요약 전문가다.
-                입력 transcript를 바탕으로 실무자가 바로 볼 수 있는 요약만 작성한다.
-                반드시 한국어로 답하고, 과장하지 말고, 없는 내용을 만들지 않는다.
-                형식:
-                1. 핵심 요약: 3문장 이내
-                2. 결정/요구사항: bullet list
-                3. 후속 액션: 담당자가 불명확하면 "담당자 미정"으로 표시
-                """.trimIndent(),
+                "input",
+                AiPromptTemplates.buildSummaryPrompt(
+                    context = context,
+                    mode = mode,
+                ),
             )
-            .put("input", transcript)
+
+        val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpsURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 30_000
+            readTimeout = 120_000
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        }
+
+        connection.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write(request.toString())
+        }
+
+        return formatSummaryOutput(
+            rawOutput = extractOutputText(JSONObject(connection.readBodyOrThrow())),
+            mode = mode,
+        )
+    }
+
+    fun generateJinsangEmpathy(
+        customerTranscript: String,
+        analysis: JinsangAnalysis,
+    ): String {
+        ensureConfigured()
+        val empathyContext = JinsangEmpathyContext.fromCustomerTranscript(customerTranscript)
+
+        val request = JSONObject()
+            .put("model", summaryModel)
+            .put("store", false)
+            .put("max_output_tokens", 120)
+            .put("instructions", AiPromptTemplates.empathyInstructions)
+            .put(
+                "input",
+                AiPromptTemplates.buildEmpathyPrompt(
+                    empathyContext = empathyContext,
+                    analysis = analysis,
+                ),
+            )
 
         val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpsURLConnection).apply {
             requestMethod = "POST"
@@ -146,5 +188,70 @@ class OpenAiClient(
         return chunks.joinToString("\n").ifBlank {
             "요약 결과를 읽지 못했습니다."
         }
+    }
+
+    private fun formatSummaryOutput(
+        rawOutput: String,
+        mode: SummaryMode,
+    ): String {
+        val key = when (mode) {
+            SummaryMode.BUSINESS -> "items"
+            SummaryMode.COMFORT -> "interpretations"
+        }
+        val lines = runCatching {
+            JSONObject(rawOutput.extractJsonObject())
+                .optJSONArray(key)
+                ?.toStringList()
+                .orEmpty()
+        }.getOrDefault(emptyList())
+
+        return lines
+            .map { it.cleanSummaryLine() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(MAX_SUMMARY_LINES)
+            .joinToString("\n") { "- $it" }
+            .ifBlank { rawOutput.cleanPlainSummary() }
+    }
+
+    private fun String.extractJsonObject(): String {
+        val trimmed = trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        return if (start >= 0 && end >= start) {
+            trimmed.substring(start, end + 1)
+        } else {
+            trimmed
+        }
+    }
+
+    private fun JSONArray.toStringList(): List<String> =
+        buildList {
+            for (index in 0 until length()) {
+                optString(index)
+                    .takeIf { it.isNotBlank() }
+                    ?.let(::add)
+            }
+        }
+
+    private fun String.cleanSummaryLine(): String =
+        trim()
+            .removePrefix("-")
+            .removePrefix("•")
+            .trim()
+
+    private fun String.cleanPlainSummary(): String =
+        lineSequence()
+            .map { it.cleanSummaryLine() }
+            .filter { it.isNotBlank() }
+            .take(MAX_SUMMARY_LINES)
+            .joinToString("\n") { "- $it" }
+
+    private companion object {
+        private const val MAX_SUMMARY_LINES = 7
     }
 }

@@ -68,20 +68,33 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.ideathon.kondaeshield.accessibility.VolumeKeyAccessibilityService
-import com.ideathon.kondaeshield.analysis.NaggingAnalysis
-import com.ideathon.kondaeshield.analysis.NaggingAnalyzer
+import com.ideathon.kondaeshield.ai.GroqClient
+import com.ideathon.kondaeshield.ai.OpenAiClient
+import com.ideathon.kondaeshield.analysis.JinsangAnalysis
+import com.ideathon.kondaeshield.analysis.JinsangAnalyzer
+import com.ideathon.kondaeshield.analysis.JinsangEmpathyContext
+import com.ideathon.kondaeshield.analysis.JinsangSpeechFilter
 import com.ideathon.kondaeshield.data.ProcessingState
 import com.ideathon.kondaeshield.data.RecordingRepository
 import com.ideathon.kondaeshield.data.RecordingSession
 import com.ideathon.kondaeshield.recording.RecordingService
 import com.ideathon.kondaeshield.settings.ApiKeyStore
 import com.ideathon.kondaeshield.settings.ApiProvider
+import com.ideathon.kondaeshield.summary.SummaryMode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -95,13 +108,14 @@ class MainActivity : ComponentActivity() {
     private var hasNotificationPermission by mutableStateOf(true)
     private var accessibilityEnabled by mutableStateOf(false)
     private var storedProviders by mutableStateOf<Set<ApiProvider>>(emptySet())
-    private var transcriptionProvider by mutableStateOf(ApiProvider.GROQ)
     private var selectedTab by mutableStateOf(RECORD_SCRIPT_TAB)
     private var showApiKeyDialog by mutableStateOf(false)
-    private var apiKeyProvider by mutableStateOf(ApiProvider.GROQ)
+    private var apiKeyProvider by mutableStateOf(ApiProvider.OPENAI)
     private var apiKeyDraft by mutableStateOf("")
     private var transcriptDialogSession by mutableStateOf<RecordingSession?>(null)
     private var deleteDialogSession by mutableStateOf<RecordingSession?>(null)
+    private var summaryInProgressIds by mutableStateOf<Set<String>>(emptySet())
+    private var summaryErrorMessages by mutableStateOf<Map<String, String>>(emptyMap())
     private var receiverRegistered = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -131,13 +145,14 @@ class MainActivity : ComponentActivity() {
                     hasNotificationPermission = hasNotificationPermission,
                     accessibilityEnabled = accessibilityEnabled,
                     storedProviders = storedProviders,
-                    transcriptionProvider = transcriptionProvider,
                     selectedTab = selectedTab,
                     showApiKeyDialog = showApiKeyDialog,
                     apiKeyProvider = apiKeyProvider,
                     apiKeyDraft = apiKeyDraft,
                     transcriptDialogSession = transcriptDialogSession,
                     deleteDialogSession = deleteDialogSession,
+                    summaryInProgressIds = summaryInProgressIds,
+                    summaryErrorMessages = summaryErrorMessages,
                     onSelectTab = { selectedTab = it },
                     onRefresh = {
                         refreshSessions()
@@ -168,16 +183,36 @@ class MainActivity : ComponentActivity() {
                     onDismissDelete = {
                         deleteDialogSession = null
                     },
-                    onAnalyzeNagging = { session ->
-                        val analysis = NaggingAnalyzer.analyze(session.transcript)
-                        repository.updateSession(session.id) {
-                            it.copy(naggingAnalysis = analysis.toJsonString())
-                        }
-                        refreshSessions()
+                    onGenerateSummary = { session, mode ->
+                        generateSummaryForSession(session, mode)
                     },
-                    onSelectTranscriptionProvider = { provider ->
-                        apiKeyStore.setTranscriptionProvider(provider)
-                        refreshSettingsState()
+                    onAnalyzeJinsang = { session ->
+                        lifecycleScope.launch {
+                            val analysis = withContext(Dispatchers.Default) {
+                                JinsangAnalyzer.analyze(session.transcript)
+                            }
+                            repository.updateSession(session.id) {
+                                it.copy(naggingAnalysis = analysis.toJsonString())
+                            }
+                            refreshSessions()
+
+                            val aiEmpathyMessage = withContext(Dispatchers.IO) {
+                                generateAiEmpathyMessage(
+                                    transcript = session.transcript,
+                                    analysis = analysis,
+                                )
+                            }
+                            if (aiEmpathyMessage.isNullOrBlank()) return@launch
+
+                            repository.updateSession(session.id) {
+                                it.copy(
+                                    naggingAnalysis = analysis.copy(
+                                        empathyMessage = aiEmpathyMessage,
+                                    ).toJsonString(),
+                                )
+                            }
+                            refreshSessions()
+                        }
                     },
                     onOpenApiKeyDialog = { provider ->
                         apiKeyProvider = provider
@@ -242,7 +277,6 @@ class MainActivity : ComponentActivity() {
         updatePermissionState()
         updateAccessibilityState()
         storedProviders = apiKeyStore.getStoredProviders()
-        transcriptionProvider = apiKeyStore.getTranscriptionProvider()
     }
 
     private fun requestMissingPermissionsOnLaunch() {
@@ -297,6 +331,154 @@ class MainActivity : ComponentActivity() {
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
+
+    private fun generateSummaryForSession(
+        session: RecordingSession,
+        mode: SummaryMode,
+    ) {
+        val key = summaryKey(session.id, mode)
+        summaryInProgressIds = summaryInProgressIds + key
+        summaryErrorMessages = summaryErrorMessages - key
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    generateSummaryText(
+                        transcript = session.transcript,
+                        mode = mode,
+                    )
+                }
+            }
+
+            result
+                .onSuccess { summaryText ->
+                    repository.updateSession(session.id) { current ->
+                        when (mode) {
+                            SummaryMode.BUSINESS -> current.copy(
+                                summary = summaryText,
+                                businessSummary = summaryText,
+                            )
+
+                            SummaryMode.COMFORT -> current.copy(
+                                comfortInterpretation = summaryText,
+                            )
+                        }
+                    }
+                    refreshSessions()
+                }
+                .onFailure { throwable ->
+                    summaryErrorMessages = summaryErrorMessages + (
+                        key to (throwable.message ?: "요약을 생성하지 못했습니다.")
+                    )
+                }
+
+            summaryInProgressIds = summaryInProgressIds - key
+        }
+    }
+
+    private fun generateSummaryText(
+        transcript: String,
+        mode: SummaryMode,
+    ): String {
+        val openAiResult = apiKeyStore.getApiKey(ApiProvider.OPENAI)
+            .takeIf { it.isNotBlank() }
+            ?.let { apiKey ->
+                runCatching {
+                    OpenAiClient(apiKey).generateSummary(
+                        transcript = transcript,
+                        mode = mode,
+                    )
+                }.getOrNull()
+            }
+            ?.takeIf { it.isNotBlank() }
+
+        if (openAiResult != null) return openAiResult
+
+        val groqResult = apiKeyStore.getApiKey(ApiProvider.GROQ)
+            .takeIf { it.isNotBlank() }
+            ?.let { apiKey ->
+                runCatching {
+                    GroqClient(apiKey).generateSummary(
+                        transcript = transcript,
+                        mode = mode,
+                    )
+                }.getOrNull()
+            }
+            ?.takeIf { it.isNotBlank() }
+
+        if (groqResult != null) return groqResult
+
+        error("요약을 생성하려면 OpenAI 또는 Groq API 키를 설정해 주세요.")
+    }
+
+    private fun generateAiEmpathyMessage(
+        transcript: String,
+        analysis: JinsangAnalysis,
+    ): String? {
+        val customerTranscript = JinsangSpeechFilter.extractCustomerSpeech(transcript)
+            .ifBlank { transcript }
+        val empathyContext = JinsangEmpathyContext.fromCustomerTranscript(customerTranscript)
+
+        val openAiMessage = apiKeyStore.getApiKey(ApiProvider.OPENAI)
+            .takeIf { it.isNotBlank() }
+            ?.let { apiKey ->
+                runCatching {
+                    OpenAiClient(apiKey).generateJinsangEmpathy(
+                        customerTranscript = customerTranscript,
+                        analysis = analysis,
+                    )
+                }.getOrNull()
+            }
+            ?.cleanAiEmpathyMessage(empathyContext.referenceLines)
+            ?.takeIf { it.isNotBlank() }
+
+        if (openAiMessage != null) return openAiMessage
+
+        return apiKeyStore.getApiKey(ApiProvider.GROQ)
+            .takeIf { it.isNotBlank() }
+            ?.let { apiKey ->
+                runCatching {
+                    GroqClient(apiKey).generateJinsangEmpathy(
+                        customerTranscript = customerTranscript,
+                        analysis = analysis,
+                    )
+                }.getOrNull()
+            }
+            ?.cleanAiEmpathyMessage(empathyContext.referenceLines)
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun String.cleanAiEmpathyMessage(referenceLines: List<String>): String? {
+        val cleaned = lineSequence()
+            .map { it.trim().removePrefix("-").trim() }
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .replace(Regex("\\s+"), " ")
+            .replace(Regex("^(공감|위로)\\s*[:：]\\s*"), "")
+            .trim()
+            .trim('"', '\'', '“', '”')
+        if (cleaned.isBlank()) return null
+        if (AI_EMPATHY_SPEAKER_LABEL_REGEX.containsMatchIn(cleaned)) return null
+        if (cleaned.copiesReferenceLine(referenceLines)) return null
+
+        return if (cleaned.length <= MAX_AI_EMPATHY_CHARS) {
+            cleaned
+        } else {
+            cleaned.take(MAX_AI_EMPATHY_CHARS).trimEnd() + "..."
+        }
+    }
+
+    private fun String.copiesReferenceLine(referenceLines: List<String>): Boolean {
+        val compactMessage = compactForCopyCheck()
+        return referenceLines.any { referenceLine ->
+            val compactReference = referenceLine.compactForCopyCheck()
+            compactReference.length >= MIN_COPIED_REFERENCE_CHARS &&
+                compactMessage.contains(compactReference.take(MIN_COPIED_REFERENCE_CHARS))
+        }
+    }
+
+    private fun String.compactForCopyCheck(): String =
+        replace(Regex("\\s+"), "")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -307,13 +489,14 @@ private fun NagBlockerScreen(
     hasNotificationPermission: Boolean,
     accessibilityEnabled: Boolean,
     storedProviders: Set<ApiProvider>,
-    transcriptionProvider: ApiProvider,
     selectedTab: Int,
     showApiKeyDialog: Boolean,
     apiKeyProvider: ApiProvider,
     apiKeyDraft: String,
     transcriptDialogSession: RecordingSession?,
     deleteDialogSession: RecordingSession?,
+    summaryInProgressIds: Set<String>,
+    summaryErrorMessages: Map<String, String>,
     onSelectTab: (Int) -> Unit,
     onRefresh: () -> Unit,
     onRequestPermissions: () -> Unit,
@@ -324,8 +507,8 @@ private fun NagBlockerScreen(
     onRequestDelete: (RecordingSession) -> Unit,
     onConfirmDelete: () -> Unit,
     onDismissDelete: () -> Unit,
-    onAnalyzeNagging: (RecordingSession) -> Unit,
-    onSelectTranscriptionProvider: (ApiProvider) -> Unit,
+    onGenerateSummary: (RecordingSession, SummaryMode) -> Unit,
+    onAnalyzeJinsang: (RecordingSession) -> Unit,
     onOpenApiKeyDialog: (ApiProvider) -> Unit,
     onApiKeyDraftChange: (String) -> Unit,
     onSaveApiKey: () -> Unit,
@@ -336,10 +519,7 @@ private fun NagBlockerScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = "꼰BTI",
-                        fontWeight = FontWeight.Bold,
-                    )
+                    AppTitle()
                 },
                 actions = {
                     IconButton(onClick = onRefresh) {
@@ -374,10 +554,10 @@ private fun NagBlockerScreen(
                     onClick = { onSelectTab(SUMMARY_TAB) },
                 )
                 AppTab(
-                    selected = selectedTab == NAGGING_TAB,
-                    label = "꼰대력",
+                    selected = selectedTab == JINSANG_TAB,
+                    label = "진상력",
                     icon = Icons.Default.Security,
-                    onClick = { onSelectTab(NAGGING_TAB) },
+                    onClick = { onSelectTab(JINSANG_TAB) },
                 )
                 AppTab(
                     selected = selectedTab == SETTINGS_TAB,
@@ -392,17 +572,22 @@ private fun NagBlockerScreen(
                     sessions = sessions,
                     hasAudioPermission = hasAudioPermission,
                     hasNotificationPermission = hasNotificationPermission,
-                    hasTranscriptionApiKey = transcriptionProvider in storedProviders,
+                    hasTranscriptionApiKey = storedProviders.isNotEmpty(),
                     onToggleRecording = onToggleRecording,
                     onOpenTranscript = onOpenTranscript,
                     onRequestDelete = onRequestDelete,
                 )
 
-                SUMMARY_TAB -> SummaryTab(sessions = sessions)
-
-                NAGGING_TAB -> NaggingTab(
+                SUMMARY_TAB -> SummaryTab(
                     sessions = sessions,
-                    onAnalyzeNagging = onAnalyzeNagging,
+                    summaryInProgressIds = summaryInProgressIds,
+                    summaryErrorMessages = summaryErrorMessages,
+                    onGenerateSummary = onGenerateSummary,
+                )
+
+                JINSANG_TAB -> JinsangTab(
+                    sessions = sessions,
+                    onAnalyzeJinsang = onAnalyzeJinsang,
                 )
 
                 SETTINGS_TAB -> SettingsTab(
@@ -410,10 +595,8 @@ private fun NagBlockerScreen(
                     hasNotificationPermission = hasNotificationPermission,
                     accessibilityEnabled = accessibilityEnabled,
                     storedProviders = storedProviders,
-                    transcriptionProvider = transcriptionProvider,
                     onRequestPermissions = onRequestPermissions,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                    onSelectTranscriptionProvider = onSelectTranscriptionProvider,
                     onOpenApiKeyDialog = onOpenApiKeyDialog,
                     onClearApiKey = onClearApiKey,
                 )
@@ -539,7 +722,12 @@ private fun RecordScriptTab(
 }
 
 @Composable
-private fun SummaryTab(sessions: List<RecordingSession>) {
+private fun SummaryTab(
+    sessions: List<RecordingSession>,
+    summaryInProgressIds: Set<String>,
+    summaryErrorMessages: Map<String, String>,
+    onGenerateSummary: (RecordingSession, SummaryMode) -> Unit,
+) {
     val scriptSessions = sessions.filter { it.transcript.isNotBlank() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -566,16 +754,21 @@ private fun SummaryTab(sessions: List<RecordingSession>) {
                 items = scriptSessions,
                 key = { it.id },
             ) { session ->
-                SummarySessionCard(session = session)
+                SummarySessionCard(
+                    session = session,
+                    summaryInProgressIds = summaryInProgressIds,
+                    summaryErrorMessages = summaryErrorMessages,
+                    onGenerateSummary = onGenerateSummary,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun NaggingTab(
+private fun JinsangTab(
     sessions: List<RecordingSession>,
-    onAnalyzeNagging: (RecordingSession) -> Unit,
+    onAnalyzeJinsang: (RecordingSession) -> Unit,
 ) {
     val scriptSessions = sessions.filter { it.transcript.isNotBlank() }
     LazyColumn(
@@ -585,8 +778,8 @@ private fun NaggingTab(
     ) {
         item {
             FeatureHeaderPanel(
-                title = "꼰BTI 측정",
-                subtitle = "스크립트 속 잔소리 패턴을 분석해 어떤 유형의 꼰대인지 분류합니다.",
+                title = "진상력 측정",
+                subtitle = "스크립트 속 손님, 고객, 매장 상황의 부당한 말과 감정노동 신호를 진상 유형으로 분류합니다.",
                 icon = Icons.Default.Security,
             )
         }
@@ -603,13 +796,34 @@ private fun NaggingTab(
                 items = scriptSessions,
                 key = { it.id },
             ) { session ->
-                NaggingSessionCard(
+                JinsangSessionCard(
                     session = session,
-                    onAnalyzeNagging = onAnalyzeNagging,
+                    onAnalyzeJinsang = onAnalyzeJinsang,
                 )
             }
         }
     }
+}
+
+@Composable
+private fun AppTitle() {
+    val smallStyle = SpanStyle(
+        fontSize = 14.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+
+    Text(
+        text = buildAnnotatedString {
+            append("진")
+            withStyle(smallStyle) { append("상 ") }
+            append("해")
+            withStyle(smallStyle) { append("석 ") }
+            append("분")
+            withStyle(smallStyle) { append("석기") }
+        },
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.Bold,
+    )
 }
 
 @Composable
@@ -618,10 +832,8 @@ private fun SettingsTab(
     hasNotificationPermission: Boolean,
     accessibilityEnabled: Boolean,
     storedProviders: Set<ApiProvider>,
-    transcriptionProvider: ApiProvider,
     onRequestPermissions: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
-    onSelectTranscriptionProvider: (ApiProvider) -> Unit,
     onOpenApiKeyDialog: (ApiProvider) -> Unit,
     onClearApiKey: (ApiProvider) -> Unit,
 ) {
@@ -636,10 +848,8 @@ private fun SettingsTab(
                 hasNotificationPermission = hasNotificationPermission,
                 accessibilityEnabled = accessibilityEnabled,
                 storedProviders = storedProviders,
-                transcriptionProvider = transcriptionProvider,
                 onRequestPermissions = onRequestPermissions,
                 onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                onSelectTranscriptionProvider = onSelectTranscriptionProvider,
                 onOpenApiKeyDialog = onOpenApiKeyDialog,
                 onClearApiKey = onClearApiKey,
             )
@@ -734,10 +944,8 @@ private fun SettingsPanel(
     hasNotificationPermission: Boolean,
     accessibilityEnabled: Boolean,
     storedProviders: Set<ApiProvider>,
-    transcriptionProvider: ApiProvider,
     onRequestPermissions: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
-    onSelectTranscriptionProvider: (ApiProvider) -> Unit,
     onOpenApiKeyDialog: (ApiProvider) -> Unit,
     onClearApiKey: (ApiProvider) -> Unit,
 ) {
@@ -793,30 +1001,12 @@ private fun SettingsPanel(
             }
         }
 
-        SettingsSection(title = "전사 공급자") {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ApiProvider.entries
-                    .filter { it.supportsTranscription }
-                    .forEach { provider ->
-                        ProviderButton(
-                            provider = provider,
-                            selected = provider == transcriptionProvider,
-                            enabled = provider in storedProviders,
-                            onClick = { onSelectTranscriptionProvider(provider) },
-                        )
-                    }
-            }
+        SettingsSection(title = "API 키") {
             Text(
-                text = "녹음 파일 전사는 현재 Groq와 OpenAI 키를 지원합니다.",
+                text = "전사, 요약, 공감 생성은 OpenAI 키를 먼저 사용하고, 없거나 실패하면 Groq 키로 시도합니다.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-
-        SettingsSection(title = "API 키") {
             ApiProvider.entries.forEach { provider ->
                 ProviderKeyRow(
                     provider = provider,
@@ -851,30 +1041,6 @@ private fun SettingsSection(
                 fontWeight = FontWeight.Bold,
             )
             content()
-        }
-    }
-}
-
-@Composable
-private fun ProviderButton(
-    provider: ApiProvider,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    if (selected) {
-        Button(
-            enabled = enabled,
-            onClick = onClick,
-        ) {
-            Text(provider.displayName)
-        }
-    } else {
-        OutlinedButton(
-            enabled = enabled,
-            onClick = onClick,
-        ) {
-            Text(provider.displayName)
         }
     }
 }
@@ -1147,7 +1313,19 @@ private fun ScriptSessionCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummarySessionCard(session: RecordingSession) {
+private fun SummarySessionCard(
+    session: RecordingSession,
+    summaryInProgressIds: Set<String>,
+    summaryErrorMessages: Map<String, String>,
+    onGenerateSummary: (RecordingSession, SummaryMode) -> Unit,
+) {
+    val businessKey = summaryKey(session.id, SummaryMode.BUSINESS)
+    val comfortKey = summaryKey(session.id, SummaryMode.COMFORT)
+    val businessLoading = businessKey in summaryInProgressIds
+    val comfortLoading = comfortKey in summaryInProgressIds
+    val businessError = summaryErrorMessages[businessKey]
+    val comfortError = summaryErrorMessages[comfortKey]
+
     SessionShell(session = session) {
         val businessSummary = session.businessSummary.ifBlank { session.summary }
         if (businessSummary.isNotBlank()) {
@@ -1166,7 +1344,7 @@ private fun SummarySessionCard(session: RecordingSession) {
         }
         if (businessSummary.isBlank() && session.comfortInterpretation.isBlank()) {
             Text(
-                text = "요약 결과가 없습니다. 팀원이 이 버튼에 생성 로직을 연결하면 됩니다.",
+                text = "아직 요약 결과가 없습니다. 업무 요약은 해야 할 일을, 마음 보호는 공격적인 표현을 덜어낸 의도를 보여줍니다.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1176,41 +1354,64 @@ private fun SummarySessionCard(session: RecordingSession) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             OutlinedButton(
-                enabled = false,
-                onClick = {},
+                enabled = !businessLoading && session.transcript.isNotBlank(),
+                onClick = { onGenerateSummary(session, SummaryMode.BUSINESS) },
             ) {
-                Text("업무용 요약")
+                Text(
+                    when {
+                        businessLoading -> "업무 요약 중..."
+                        businessSummary.isNotBlank() -> "업무 요약 다시"
+                        else -> "업무 요약"
+                    },
+                )
             }
             OutlinedButton(
-                enabled = false,
-                onClick = {},
+                enabled = !comfortLoading && session.transcript.isNotBlank(),
+                onClick = { onGenerateSummary(session, SummaryMode.COMFORT) },
             ) {
-                Text("마음 보호")
+                Text(
+                    when {
+                        comfortLoading -> "마음 보호 중..."
+                        session.comfortInterpretation.isNotBlank() -> "마음 보호 다시"
+                        else -> "마음 보호"
+                    },
+                )
             }
+        }
+
+        if (businessError != null || comfortError != null) {
+            Text(
+                text = listOfNotNull(
+                    businessError?.let { "업무 요약: $it" },
+                    comfortError?.let { "마음 보호: $it" },
+                ).joinToString("\n"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }
 
 @Composable
-private fun NaggingSessionCard(
+private fun JinsangSessionCard(
     session: RecordingSession,
-    onAnalyzeNagging: (RecordingSession) -> Unit,
+    onAnalyzeJinsang: (RecordingSession) -> Unit,
 ) {
-    val analysis = NaggingAnalysis.fromJsonString(session.naggingAnalysis)
+    val analysis = JinsangAnalysis.fromJsonString(session.naggingAnalysis)
 
     SessionShell(session = session) {
         if (analysis != null) {
-            NaggingResultContent(analysis = analysis)
+            JinsangResultContent(analysis = analysis)
         } else {
             Text(
-                text = "아직 꼰BTI 결과가 없습니다. 이 스크립트를 분석해서 잔소리 유형을 확인해보세요.",
+                text = "아직 진상력 결과가 없습니다. 이 스크립트를 분석해서 부당한 말과 갑질 신호를 확인해보세요.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
         OutlinedButton(
-            onClick = { onAnalyzeNagging(session) },
+            onClick = { onAnalyzeJinsang(session) },
         ) {
             Icon(
                 modifier = Modifier.size(18.dp),
@@ -1218,13 +1419,13 @@ private fun NaggingSessionCard(
                 contentDescription = null,
             )
             Spacer(modifier = Modifier.size(8.dp))
-            Text(if (analysis == null) "꼰BTI 측정" else "다시 측정")
+            Text(if (analysis == null) "진상력 측정" else "다시 측정")
         }
     }
 }
 
 @Composable
-private fun NaggingResultContent(analysis: NaggingAnalysis) {
+private fun JinsangResultContent(analysis: JinsangAnalysis) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
@@ -1234,18 +1435,25 @@ private fun NaggingResultContent(analysis: NaggingAnalysis) {
                 color = MaterialTheme.colorScheme.primary,
             )
             Text(
-                text = "꼰대력 ${analysis.totalPercent}%",
+                text = "진상력 ${analysis.totalPercent}%",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+            if (analysis.analyzedAtEpochMillis > 0L) {
+                Text(
+                    text = "최근 측정 ${formatSessionTime(analysis.analyzedAtEpochMillis)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            NaggingScoreRow(label = "비난", percent = analysis.blamePercent)
-            NaggingScoreRow(label = "비교", percent = analysis.comparisonPercent)
-            NaggingScoreRow(label = "일방적 지시", percent = analysis.commandPercent)
-            NaggingScoreRow(label = "라떼력", percent = analysis.lattePercent)
-            NaggingScoreRow(label = "실질 조언", percent = analysis.practicalAdvicePercent)
+            JinsangScoreRow(label = "책임전가/비난", percent = analysis.blamePercent)
+            JinsangScoreRow(label = "하대/비하", percent = analysis.belittlingPercent)
+            JinsangScoreRow(label = "무리한 요구", percent = analysis.demandPercent)
+            JinsangScoreRow(label = "갑질/특권 요구", percent = analysis.entitlementPercent)
+            JinsangScoreRow(label = "간섭/훈수", percent = analysis.interferencePercent)
         }
 
         TextSection(
@@ -1262,7 +1470,7 @@ private fun NaggingResultContent(analysis: NaggingAnalysis) {
 }
 
 @Composable
-private fun NaggingScoreRow(
+private fun JinsangScoreRow(
     label: String,
     percent: Int,
 ) {
@@ -1443,7 +1651,15 @@ private fun ProcessingState.canDelete(): Boolean =
         this != ProcessingState.TRANSCRIBING &&
         this != ProcessingState.SUMMARIZING
 
+private fun summaryKey(
+    sessionId: String,
+    mode: SummaryMode,
+): String = "$sessionId:${mode.name}"
+
 private const val RECORD_SCRIPT_TAB = 0
 private const val SUMMARY_TAB = 1
-private const val NAGGING_TAB = 2
+private const val JINSANG_TAB = 2
 private const val SETTINGS_TAB = 3
+private const val MAX_AI_EMPATHY_CHARS = 240
+private const val MIN_COPIED_REFERENCE_CHARS = 18
+private val AI_EMPATHY_SPEAKER_LABEL_REGEX = Regex("(손님|고객|알바생|직원|매니저|관리자)\\s*[:：]")

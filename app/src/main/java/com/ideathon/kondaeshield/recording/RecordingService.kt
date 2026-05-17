@@ -183,15 +183,20 @@ class RecordingService : Service() {
     }
 
     private fun transcribe(audioFile: File): String {
-        val apiKey = apiKeyStore.getTranscriptionApiKey()
-        return when (apiKeyStore.getTranscriptionProvider()) {
-            ApiProvider.GROQ -> GroqClient(apiKey).transcribe(audioFile)
-            ApiProvider.OPENAI -> OpenAiClient(apiKey).transcribe(audioFile)
-            ApiProvider.GEMINI,
-            ApiProvider.CLAUDE,
-            ApiProvider.CUSTOM,
-            -> error("현재 전사는 Groq 또는 OpenAI API 키로만 지원됩니다.")
+        val openAiKey = apiKeyStore.getApiKey(ApiProvider.OPENAI).takeIf { it.isNotBlank() }
+        val openAiFailure = openAiKey?.let { apiKey ->
+            runCatching { return OpenAiClient(apiKey).transcribe(audioFile) }
+                .exceptionOrNull()
         }
+
+        val groqKey = apiKeyStore.getApiKey(ApiProvider.GROQ).takeIf { it.isNotBlank() }
+        val groqFailure = groqKey?.let { apiKey ->
+            runCatching { return GroqClient(apiKey).transcribe(audioFile) }
+                .exceptionOrNull()
+        }
+
+        val fallbackMessage = openAiFailure?.message ?: groqFailure?.message
+        error(fallbackMessage ?: "전사를 하려면 OpenAI 또는 Groq API 키를 설정해 주세요.")
     }
 
     private fun createAudioFile(sessionId: String): File {

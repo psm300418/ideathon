@@ -1,0 +1,125 @@
+package com.ideathon.kondaeshield.analysis
+
+internal data class KeywordRule(
+    val phrase: String,
+    val weight: Int = 1,
+)
+
+internal object JinsangKeywordRules {
+    val blame = listOf(
+        KeywordRule("왜 이렇게 못해", 2),
+        KeywordRule("이것도 못해", 2),
+        KeywordRule("계산도 못해", 2),
+        KeywordRule("주문도 못 받아", 2),
+        KeywordRule("제대로 안 해"),
+        KeywordRule("똑바로 안 해", 2),
+        KeywordRule("네가 실수했잖아", 2),
+        KeywordRule("너 때문", 2),
+        KeywordRule("직원 교육 안 됐네", 2),
+        KeywordRule("답답하다"),
+        KeywordRule("한심하다", 2),
+        KeywordRule("불친절하네"),
+        KeywordRule("센스가 없어"),
+        KeywordRule("기본도 모르네"),
+        KeywordRule("내 시간 날렸어", 2),
+        KeywordRule("책임져", 2),
+        KeywordRule("사과만 하면 다야"),
+        KeywordRule("알바라서 그래"),
+    )
+
+    val belittling = listOf(
+        KeywordRule("알바 주제에", 2),
+        KeywordRule("직원 주제에", 2),
+        KeywordRule("말귀 못 알아들어", 2),
+        KeywordRule("손님한테 말대꾸", 2),
+        KeywordRule("내가 손님인데", 2),
+        KeywordRule("손님이 왕", 2),
+        KeywordRule("서비스직이면"),
+        KeywordRule("웃으면서 해야지"),
+        KeywordRule("그 태도가 뭐야"),
+        KeywordRule("여기 수준"),
+        KeywordRule("다른 매장은"),
+        KeywordRule("다른 직원은"),
+        KeywordRule("너 말고 매니저 불러"),
+        KeywordRule("초짜야"),
+        KeywordRule("일 못하네"),
+        KeywordRule("교육 좀 받아"),
+        KeywordRule("기분 나쁘게 하네"),
+    )
+
+    val demand = listOf(
+        KeywordRule("당장 해", 2),
+        KeywordRule("빨리 해", 2),
+        KeywordRule("지금 바로", 2),
+        KeywordRule("무조건"),
+        KeywordRule("안 되면 되게 해", 2),
+        KeywordRule("규정이 어딨어", 2),
+        KeywordRule("그냥 해줘"),
+        KeywordRule("환불해", 2),
+        KeywordRule("바꿔줘"),
+        KeywordRule("무료로 해줘", 2),
+        KeywordRule("서비스로 줘", 2),
+        KeywordRule("깎아줘"),
+        KeywordRule("나 먼저 해줘"),
+        KeywordRule("줄 서야 돼"),
+        KeywordRule("기다리라고"),
+        KeywordRule("문 닫았어도"),
+        KeywordRule("마감했어도"),
+        KeywordRule("품절이어도"),
+        KeywordRule("해달라면 해"),
+    )
+
+    val entitlement = listOf(
+        KeywordRule("내가 단골인데", 2),
+        KeywordRule("내가 여기 얼마나 썼는데", 2),
+        KeywordRule("사장 불러", 2),
+        KeywordRule("매니저 불러", 2),
+        KeywordRule("본사에 연락"),
+        KeywordRule("리뷰 남길 거야", 2),
+        KeywordRule("민원 넣을 거야", 2),
+        KeywordRule("신고할 거야", 2),
+        KeywordRule("컴플레인"),
+        KeywordRule("SNS에 올릴 거야", 2),
+        KeywordRule("장사 그렇게 하지 마"),
+        KeywordRule("서비스 정신"),
+        KeywordRule("이 가게 망하게"),
+        KeywordRule("다시는 안 와"),
+        KeywordRule("내가 누군지 알아", 2),
+        KeywordRule("사과문 써"),
+        KeywordRule("본사 번호 줘"),
+    )
+
+    val interference = listOf(
+        KeywordRule("내가 알려줄게"),
+        KeywordRule("내 방식대로 해", 2),
+        KeywordRule("내가 해봐서 아는데"),
+        KeywordRule("그렇게 하지 말고"),
+        KeywordRule("이건 이렇게 해야지"),
+        KeywordRule("내 말대로 하면 돼", 2),
+        KeywordRule("서비스직은 원래"),
+        KeywordRule("웃으면서 넘겨"),
+        KeywordRule("그 정도는 참고"),
+        KeywordRule("참아야지"),
+        KeywordRule("고객이 우선이야"),
+        KeywordRule("개인 감정 넣지 마"),
+        KeywordRule("네가 맞춰야지"),
+        KeywordRule("시키는 대로 해", 2),
+        KeywordRule("말대꾸하지 마", 2),
+        KeywordRule("토 달지 마"),
+    )
+
+    val intensifiers = listOf(
+        "당장",
+        "지금 바로",
+        "빨리",
+        "무조건",
+        "대체",
+        "도대체",
+        "진짜",
+        "너무",
+        "계속",
+        "몇 번을",
+        "매번",
+        "반드시",
+    )
+}

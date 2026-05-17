@@ -142,7 +142,7 @@ class RecordingRepository(context: Context) {
 
     private companion object {
         private const val DEBUG_SAMPLE_TRANSCRIPTS_DIR = "sample_transcripts"
-        private const val DEBUG_SAMPLE_SET_MARKER = "sampleSetVersion=2"
+        private const val DEBUG_SAMPLE_SET_MARKER = "sampleSetVersion=4"
         private const val DEBUG_SAMPLE_TIME_GAP_MILLIS = 60L * 60L * 1000L
     }
 }
